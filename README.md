@@ -1,4 +1,4 @@
-# Sunbird Trust — Linens & Bedding Register (Streamlit)
+# Sunbird Trust — Inventory Management Register (Streamlit)
 
 An editable, monthly-tracking version of the inventory dashboard — same
 look and information as the HTML version, but every screen is backed by
