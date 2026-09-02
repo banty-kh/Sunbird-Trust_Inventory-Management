@@ -4,6 +4,10 @@ An editable, monthly-tracking version of the inventory dashboard — same
 look and information as the HTML version, but every screen is backed by
 `inventory_data.json`, which the app reads from and writes back to.
 
+The dashboard can also download the shared Google Sheet and rebuild the JSON
+file directly from it, so the locally displayed data can be refreshed without
+manually exporting or copying spreadsheet rows.
+
 ## Run it
 
 ```bash
@@ -12,6 +16,15 @@ streamlit run inventory_app.py
 ```
 
 It opens at http://localhost:8501
+
+## Sync from Google Sheets
+
+Use **↻ Sync from Google Sheet** in the header to download the configured
+shared workbook and replace `inventory_data.json` with its current inventory
+records. The existing JSON file is only replaced after the downloaded workbook
+has been validated. The source sheet must remain accessible to people with the
+link and each inventory tab needs a header row (within the first 20 rows) with
+`Month` plus `Address` or `Location`; common column-name variants are accepted.
 
 ## What's in each tab
 
