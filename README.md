@@ -23,12 +23,10 @@ Use **↻ Sync from Google Sheet** in the header to download the configured
 shared workbook and replace `inventory_data.json` with its current inventory
 records. The existing JSON file is only replaced after the downloaded workbook
 has been validated. The source sheet must remain accessible to people with the
-link and each inventory tab needs either a header row (within the first 100
-rows) with `Month` (including `Month & Year`) plus `Address` or `Location`, or
-a grouped monthly layout with month names across the columns and `New` / `Used`
-/ `Total` beneath each month. Common column-name variants are accepted. Title
-and instruction rows above the table are therefore safe to add without
-preventing a sync.
+link and each inventory tab needs a header row (within the first 100 rows) with
+`Month` (including `Month & Year`) plus `Address` or `Location`; common
+column-name variants are accepted. Title and instruction rows above the table
+are therefore safe to add without preventing a sync.
 
 ## What's in each tab
 

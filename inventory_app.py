@@ -31,7 +31,6 @@ GOOGLE_SHEET_ID = "1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0"
 GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit?usp=sharing"
 GOOGLE_SHEET_EXPORT_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
 HEADER_SCAN_ROWS = 100
-HEADER_SCAN_DEPTH = 4
 
 MONTH_ORDER = ["January", "February", "March", "April", "May", "June", "July",
                "August", "September", "October", "November", "December"]
@@ -85,8 +84,7 @@ COLUMN_ALIASES = {
     "location_name": {"location", "locationname", "name", "partnerlocation",
                       "nameoflocation", "institution", "institutionname", "organization"},
     "address": {"address", "locationaddress", "place", "village", "area",
-                "locationoraddress", "locationandaddress", "addresslocation",
-                "nameandaddress", "institutionaddress", "partneraddress"},
+                "locationoraddress", "locationandaddress", "addresslocation"},
     "poc_name": {"poc", "pocname", "pointofcontact", "contactperson"},
     "poc_contact": {"poccontact", "contact", "contactnumber", "phone", "phone number"},
     "month": {"month", "months", "monthyear", "monthandyear", "reportingmonth"},
@@ -136,75 +134,6 @@ def _find_inventory_header(raw_sheet):
     return row_index, columns
 
 
-def _month_and_year(value):
-    """Return a recognized month and optional year from a spreadsheet cell."""
-    text = _cell_text(value)
-    if not text:
-        return "", ""
-    if isinstance(value, (datetime, pd.Timestamp)):
-        return value.strftime("%B"), str(value.year)
-    match = re.search(
-        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
-        r"\b(?:\s*[\-/,.]?\s*(20\d{2}))?",
-        text,
-        re.IGNORECASE,
-    )
-    if not match:
-        return "", ""
-    month = datetime.strptime(match.group(1)[:3].title(), "%b").strftime("%B")
-    return month, match.group(2) or ""
-
-
-def _find_wide_inventory_columns(raw_sheet):
-    """Find inventory tables whose month names are grouped across columns.
-
-    The register's item tabs can use a compact layout such as ``January`` /
-    ``February`` across the top, with ``New``, ``Used`` and ``Total`` beneath
-    each month. Google Sheets writes merged cells in that first header row as
-    blanks in an XLSX export, so the month label is carried forward here.
-    """
-    row_limit = min(HEADER_SCAN_ROWS, len(raw_sheet))
-    for start in range(row_limit):
-        for depth in range(2, min(HEADER_SCAN_DEPTH, row_limit - start) + 1):
-            header_rows = raw_sheet.iloc[start:start + depth]
-            labels, current_month, current_year = [], "", ""
-            for column in range(raw_sheet.shape[1]):
-                cells = [_cell_text(header_rows.iloc[row, column]) for row in range(depth)]
-                month, year = next((parsed for parsed in (_month_and_year(cell) for cell in cells)
-                                    if parsed[0]), ("", ""))
-                if month:
-                    current_month, current_year = month, year
-                labels.append((" ".join(cell for cell in cells if cell), current_month, current_year))
-
-            columns = _canonical_columns([label[0] for label in labels])
-            if not ({"address", "location_name"} & set(columns)):
-                continue
-            monthly_columns = []
-            for index, (label, month, year) in enumerate(labels):
-                if not month:
-                    continue
-                field = _canonical_columns([label]).get(0)
-                normalized = _normalise_column_name(label)
-                # Compact sheets commonly label the sub-columns simply New,
-                # Used and Total instead of Closing New/Used/Total.
-                if "closing" in normalized:
-                    metric = field
-                elif normalized.endswith("new"):
-                    metric = "closing_new"
-                elif normalized.endswith("used"):
-                    metric = "closing_used"
-                elif normalized.endswith("total") or normalized.endswith("stock"):
-                    metric = "closing_total"
-                else:
-                    metric = None
-                if metric in {"closing_new", "closing_used", "closing_total"}:
-                    monthly_columns.append((index, month, year, metric))
-            if monthly_columns:
-                return start + depth - 1, columns, monthly_columns
-    return None
-
-
 def _cell_text(value):
     if pd.isna(value):
         return ""
@@ -245,40 +174,8 @@ def spreadsheet_to_data(workbook):
     skipped_sheets = []
     for sheet_name, raw_sheet in sheets.items():
         header = _find_inventory_header(raw_sheet)
-        wide_header = None if header else _find_wide_inventory_columns(raw_sheet)
         if header is None:
-            if wide_header is None:
-                skipped_sheets.append(str(sheet_name))
-                continue
-            header_index, columns, monthly_columns = wide_header
-            item = str(sheet_name).strip()
-            for _, row in raw_sheet.iloc[header_index + 1:].iterrows():
-                def value(field, default=""):
-                    return _cell_text(row.iloc[columns[field]]) if field in columns else default
-
-                location_name, address = value("location_name"), value("address")
-                if not item or not (location_name or address):
-                    continue
-                records = {}
-                for index, month, year, metric in monthly_columns:
-                    record = records.setdefault((month, year or "2026"), {
-                        "item": item, "location_name": location_name, "address": address,
-                        "poc_name": value("poc_name"), "month": month, "year": year or "2026",
-                        "opening_new": 0, "opening_used": 0, "add_new": 0, "del_new": 0,
-                        "add_used": 0, "del_used": 0, "notes": value("notes"),
-                        "closing_new": 0, "closing_used": 0, "closing_total": 0,
-                    })
-                    record[metric] = _number(_cell_text(row.iloc[index]))
-                for record in records.values():
-                    if not record["closing_total"]:
-                        record["closing_total"] = record["closing_new"] + record["closing_used"]
-                    record["opening_total"] = record["opening_new"] + record["opening_used"]
-                    items.setdefault(item, []).append(record)
-                    location_key = (location_name, address)
-                    if location_key not in seen_locations:
-                        locations.append({"location_name": location_name, "address": address,
-                                          "poc_name": record["poc_name"], "poc_contact": value("poc_contact")})
-                        seen_locations.add(location_key)
+            skipped_sheets.append(str(sheet_name))
             continue
         header_index, columns = header
         for _, row in raw_sheet.iloc[header_index + 1:].iterrows():
