@@ -12,11 +12,7 @@
 import json
 import os
 import copy
-import re
-from io import BytesIO
 from datetime import datetime
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,10 +23,6 @@ import streamlit as st
 # ----------------------------------------------------------------------
 
 DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inventory_data.json")
-GOOGLE_SHEET_ID = "1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0"
-GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit?usp=sharing"
-GOOGLE_SHEET_EXPORT_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
-HEADER_SCAN_ROWS = 100
 
 MONTH_ORDER = ["January", "February", "March", "April", "May", "June", "July",
                "August", "September", "October", "November", "December"]
@@ -72,162 +64,6 @@ def load_data():
 def save_data(data):
     with open(DATA_PATH, "w") as f:
         json.dump(data, f, indent=2)
-
-
-def _normalise_column_name(value):
-    """Return a comparison-friendly version of a spreadsheet header."""
-    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
-
-
-COLUMN_ALIASES = {
-    "item": {"item", "itemname", "category", "itemcategory", "inventoryitem"},
-    "location_name": {"location", "locationname", "name", "partnerlocation",
-                      "nameoflocation", "institution", "institutionname", "organization"},
-    "address": {"address", "locationaddress", "place", "village", "area",
-                "locationoraddress", "locationandaddress", "addresslocation"},
-    "poc_name": {"poc", "pocname", "pointofcontact", "contactperson"},
-    "poc_contact": {"poccontact", "contact", "contactnumber", "phone", "phone number"},
-    "month": {"month", "months", "monthyear", "monthandyear", "reportingmonth"},
-    "year": {"year", "years"},
-    "opening_new": {"openingnew", "opennew", "newopening"},
-    "opening_used": {"openingused", "openused", "usedopening"},
-    "opening_total": {"openingtotal", "opentotal", "totalopening"},
-    "add_new": {"addnew", "addednew", "newadded", "newin"},
-    "del_new": {"delnew", "deletenew", "deletednew", "newout", "removenew"},
-    "add_used": {"addused", "addedused", "usedadded", "usedin"},
-    "del_used": {"delused", "deleteused", "deletedused", "usedout", "removeused"},
-    "closing_new": {"closingnew", "closenew", "newclosing"},
-    "closing_used": {"closingused", "closeused", "usedclosing"},
-    "closing_total": {"closingtotal", "closetotal", "totalclosing", "closingstock"},
-    "notes": {"notes", "note", "remarks", "comment", "comments"},
-}
-
-
-def _canonical_columns(headers):
-    canonical = {}
-    aliases = {alias: field for field, names in COLUMN_ALIASES.items()
-               for alias in {_normalise_column_name(name) for name in names}}
-    for index, header in enumerate(headers):
-        field = aliases.get(_normalise_column_name(header))
-        if field and field not in canonical:
-            canonical[field] = index
-    return canonical
-
-
-def _find_inventory_header(raw_sheet):
-    """Return the best supported header row and its columns, if present.
-
-    Google Sheets exports include any title and instruction rows above the
-    table.  Those rows can grow as a register is maintained, so do not assume
-    that the column headings are near the top of the tab.
-    """
-    candidates = []
-    for row_index in range(min(HEADER_SCAN_ROWS, len(raw_sheet))):
-        columns = _canonical_columns(raw_sheet.iloc[row_index].tolist())
-        if "month" in columns and ({"address", "location_name"} & set(columns)):
-            # Prefer the most complete candidate if a sheet contains a sample
-            # table or repeated heading later in the tab.
-            candidates.append((len(columns), row_index, columns))
-    if not candidates:
-        return None
-    _, row_index, columns = max(candidates, key=lambda candidate: candidate[0])
-    return row_index, columns
-
-
-def _cell_text(value):
-    if pd.isna(value):
-        return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
-
-
-def _number(value):
-    if pd.isna(value) or value == "":
-        return 0
-    try:
-        result = float(str(value).replace(",", "").strip())
-        return int(result) if result.is_integer() else result
-    except (TypeError, ValueError):
-        return 0
-
-
-def _month_name(value):
-    text = _cell_text(value)
-    if not text:
-        return ""
-    try:
-        return datetime.strptime(text[:3].title(), "%b").strftime("%B")
-    except ValueError:
-        return text
-
-
-def spreadsheet_to_data(workbook):
-    """Convert a normalized inventory workbook into the app's JSON structure.
-
-    Each data tab must have a header row within its first 100 rows and include
-    at least Month plus either Item (or an item-named tab) and Address/Location.
-    Column names are matched case-insensitively and accept common variations.
-    """
-    items, locations, seen_locations = {}, [], set()
-    sheets = pd.read_excel(BytesIO(workbook), sheet_name=None, header=None)
-    skipped_sheets = []
-    for sheet_name, raw_sheet in sheets.items():
-        header = _find_inventory_header(raw_sheet)
-        if header is None:
-            skipped_sheets.append(str(sheet_name))
-            continue
-        header_index, columns = header
-        for _, row in raw_sheet.iloc[header_index + 1:].iterrows():
-            def value(field, default=""):
-                return _cell_text(row.iloc[columns[field]]) if field in columns else default
-
-            item = value("item") or str(sheet_name).strip()
-            month = _month_name(value("month"))
-            location_name, address = value("location_name"), value("address")
-            if not item or not month or not (location_name or address):
-                continue
-            record = {
-                "item": item, "location_name": location_name, "address": address,
-                "poc_name": value("poc_name"), "month": month, "year": value("year", "2026") or "2026",
-                "opening_new": _number(value("opening_new")), "opening_used": _number(value("opening_used")),
-                "add_new": _number(value("add_new")), "del_new": _number(value("del_new")),
-                "add_used": _number(value("add_used")), "del_used": _number(value("del_used")),
-                "notes": value("notes"),
-            }
-            record["opening_total"] = (_number(value("opening_total")) if "opening_total" in columns
-                                       else record["opening_new"] + record["opening_used"])
-            record["closing_new"] = _number(value("closing_new")) if "closing_new" in columns else record["opening_new"] + record["add_new"] - record["del_new"]
-            record["closing_used"] = _number(value("closing_used")) if "closing_used" in columns else record["opening_used"] + record["add_used"] - record["del_used"]
-            record["closing_total"] = (_number(value("closing_total")) if "closing_total" in columns
-                                       else record["closing_new"] + record["closing_used"])
-            items.setdefault(item, []).append(record)
-            location_key = (location_name, address)
-            if location_key not in seen_locations:
-                locations.append({"location_name": location_name, "address": address,
-                                  "poc_name": record["poc_name"], "poc_contact": value("poc_contact")})
-                seen_locations.add(location_key)
-    if not items:
-        skipped = ", ".join(skipped_sheets) or "none"
-        raise ValueError(
-            "No inventory rows were found. The downloaded workbook does not contain "
-            f"a supported table in its first {HEADER_SCAN_ROWS} rows (skipped tabs: {skipped}). "
-            "Each inventory tab needs Month (or Month & Year) and Address or Location columns."
-        )
-    return {"items": items, "locations": locations}
-
-
-def sync_from_google_sheet():
-    """Download the shared workbook and replace the local JSON only after validation."""
-    request = Request(GOOGLE_SHEET_EXPORT_URL, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urlopen(request, timeout=30) as response:
-            workbook = response.read()
-    except (HTTPError, URLError, TimeoutError) as error:
-        raise RuntimeError(f"Could not download the Google Sheet: {error}") from error
-    data = spreadsheet_to_data(workbook)
-    save_data(data)
-    return data
 
 
 def init_state():
@@ -858,23 +694,6 @@ def main():
         st.markdown('<div class="masthead-sub">Stock &amp; contact register across partner locations — FY 2026-27</div>', unsafe_allow_html=True)
     with right:
         st.markdown(f'<div style="text-align:right;font-family:\'JetBrains Mono\',monospace;font-size:11.5px;color:{COLORS["ink_soft"]};padding-top:10px;">{span_label}<br>{len(items)} CATEGORIES</div>', unsafe_allow_html=True)
-        if st.button("↻ Sync from Google Sheet", use_container_width=True,
-                     help="Replace inventory_data.json with the latest data from the shared Google Sheet."):
-            with st.spinner("Downloading and validating the Google Sheet…"):
-                try:
-                    synced_data = sync_from_google_sheet()
-                except (RuntimeError, ValueError, pd.errors.ParserError) as error:
-                    st.error(f"Sync failed. Your current local data was not changed. {error}")
-                except Exception as error:
-                    st.error(f"Sync failed. Your current local data was not changed. {error}")
-                else:
-                    st.session_state.data = synced_data
-                    synced_items = list(synced_data["items"].keys())
-                    st.session_state.current_item = synced_items[0] if synced_items else None
-                    st.session_state.selected_location_key = None
-                    st.success("Synced the latest Google Sheet data to inventory_data.json.")
-                    st.rerun()
-        st.caption(f"[Open source sheet]({GOOGLE_SHEET_URL})")
 
     # Replaced stitch with double separator lines (solid + dashed) to match the mockup
     st.markdown("""
