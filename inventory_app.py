@@ -266,11 +266,35 @@ def render_overview():
     with col_a:
         with st.container(border=True):
             st.markdown('<div class="panel-title">Stock on hand, by category</div>'
-                        '<div class="panel-sub">Closing total (new + opened) at each category\'s latest recorded month</div>', unsafe_allow_html=True)
-            fig = go.Figure(go.Bar(
-                x=list(by_item.keys()), y=list(by_item.values()),
-                marker_color=COLORS["indigo"],
-            ))
+                        '<div class="panel-sub">Closing stock at each category\'s latest recorded month</div>', unsafe_allow_html=True)
+            
+            filter_mode = st.selectbox(
+                "Select Stock Category",
+                ["Both (New & Opened)", "New & Unopened", "Opened & Used"],
+                key="overview_stock_filter",
+                label_visibility="collapsed"
+            )
+
+            if filter_mode == "Both (New & Opened)":
+                by_item_new = {item: sum(r.get("closing_new", 0) or 0 for r in data["items"][item] if r["month"] == latest_month_for_item(item)) for item in items}
+                by_item_used = {item: sum(r.get("closing_used", 0) or 0 for r in data["items"][item] if r["month"] == latest_month_for_item(item)) for item in items}
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=list(items), y=[by_item_new[i] for i in items], name="New & Unopened", marker_color=COLORS["indigo"]))
+                fig.add_trace(go.Bar(x=list(items), y=[by_item_used[i] for i in items], name="Opened & Used", marker_color=COLORS["gold"]))
+                fig.update_layout(barmode="stack", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+            elif filter_mode == "New & Unopened":
+                by_item_new = {item: sum(r.get("closing_new", 0) or 0 for r in data["items"][item] if r["month"] == latest_month_for_item(item)) for item in items}
+                fig = go.Figure(go.Bar(
+                    x=list(items), y=[by_item_new[i] for i in items],
+                    marker_color=COLORS["indigo"], name="New & Unopened"
+                ))
+            else:
+                by_item_used = {item: sum(r.get("closing_used", 0) or 0 for r in data["items"][item] if r["month"] == latest_month_for_item(item)) for item in items}
+                fig = go.Figure(go.Bar(
+                    x=list(items), y=[by_item_used[i] for i in items],
+                    marker_color=COLORS["gold"], name="Opened & Used"
+                ))
+
             fig.update_layout(
                 height=300, margin=dict(l=20, r=10, t=15, b=15),
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
@@ -291,14 +315,31 @@ def render_overview():
     with col_b:
         with st.container(border=True):
             st.markdown('<div class="panel-title">Locations by total stock</div>'
-                        '<div class="panel-sub">All categories combined, latest month per category</div>', unsafe_allow_html=True)
-            rows = sorted(
-                [(display_name(l), l.get("address", ""), stock_total_for_location(l)) for l in locations],
-                key=lambda x: -x[2],
-            )
-            table_html = '<div style="max-height: 280px; overflow-y: auto;"><table class="custom-table"><thead><tr><th>LOCATION</th><th style="text-align:right;">UNITS</th></tr></thead><tbody>'
-            for name, addr, units in rows:
-                table_html += f'<tr><td><div class="loc-name">{name}</div><div class="loc-addr">{addr}</div></td><td style="text-align:right;" class="val">{units:,}</td></tr>'
+                        '<div class="panel-sub">All categories combined (New vs. Opened stock, latest month)</div>', unsafe_allow_html=True)
+            
+            # Calculate New, Used, and Total per location
+            loc_rows = []
+            for l in locations:
+                name = display_name(l)
+                addr = l.get("address", "")
+                
+                new_tot = 0
+                used_tot = 0
+                for item in items:
+                    lm = latest_month_for_item(item)
+                    for r in data["items"][item]:
+                        if r["month"] == lm and r.get("address") == l.get("address") \
+                           and (r.get("location_name") or "") == (l.get("location_name") or ""):
+                            new_tot += int(r.get("closing_new", 0) or 0)
+                            used_tot += int(r.get("closing_used", 0) or 0)
+                tot = new_tot + used_tot
+                loc_rows.append((name, addr, new_tot, used_tot, tot))
+            
+            loc_rows.sort(key=lambda x: -x[4])
+            
+            table_html = '<div style="max-height: 280px; overflow-y: auto;"><table class="custom-table"><thead><tr><th>LOCATION</th><th style="text-align:right;">NEW</th><th style="text-align:right;">OPENED</th><th style="text-align:right;">TOTAL</th></tr></thead><tbody>'
+            for name, addr, n_val, u_val, t_val in loc_rows:
+                table_html += f'<tr><td><div class="loc-name">{name}</div><div class="loc-addr">{addr}</div></td><td style="text-align:right;" class="val">{n_val:,}</td><td style="text-align:right;" class="val">{u_val:,}</td><td style="text-align:right;" class="val" style="font-weight:600;">{t_val:,}</td></tr>'
             table_html += '</tbody></table></div>'
             st.markdown(table_html, unsafe_allow_html=True)
 
@@ -404,7 +445,7 @@ def render_locations():
             chosen_key = options[chosen_label]
             loc = next(l for l in locations if loc_key(l) == chosen_key)
 
-            col1, col2 = st.columns([1, 1])
+            col1, col2 = st.columns([1.6, 1])
             with col1:
                 st.markdown(f"**{display_name(loc)}**  \n{loc.get('address','')}")
                 if loc.get("poc_name"):
@@ -413,6 +454,10 @@ def render_locations():
                     st.markdown('<span class="no-poc">No point of contact on file</span>', unsafe_allow_html=True)
 
                 rows = []
+                # Determine all active months present in data
+                all_months = [m for m in MONTH_ORDER if any(any(r["month"] == m for r in data["items"][i]) for i in item_order())]
+                month_cols = [m[:3] for m in all_months]
+
                 for item in item_order():
                     recs = [r for r in data["items"][item]
                             if r.get("address") == loc.get("address") and (r.get("location_name") or "") == (loc.get("location_name") or "")]
@@ -420,10 +465,25 @@ def render_locations():
                         continue
                     lm = latest_month_for_item(item)
                     lm_rec = next((r for r in recs if r["month"] == lm), None)
-                    by_month = ", ".join(f"{r['month'][:3]}:{r['closing_total']}" for r in recs)
-                    rows.append({"Category": item, "Latest": lm_rec["closing_total"] if lm_rec else "—", "By month": by_month})
+
+                    row = {
+                        "Category": item,
+                        "Latest (New)": int(lm_rec["closing_new"]) if lm_rec else 0,
+                        "Latest (Opened)": int(lm_rec["closing_used"]) if lm_rec else 0,
+                        "Latest Total": int(lm_rec["closing_total"]) if lm_rec else 0,
+                    }
+
+                    # Add column per month
+                    by_m_rec = {r["month"]: r for r in recs}
+                    for m in all_months:
+                        r_m = by_m_rec.get(m)
+                        row[m[:3]] = int(r_m["closing_total"]) if r_m else 0
+
+                    rows.append(row)
+
                 if rows:
-                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                    cols_order = ["Category", "Latest (New)", "Latest (Opened)", "Latest Total"] + month_cols
+                    st.dataframe(pd.DataFrame(rows)[cols_order], hide_index=True, use_container_width=True)
 
             with col2:
                 loc_events = [e for e in all_events() if e["address"] == loc.get("address")]
@@ -522,25 +582,62 @@ def render_inventory():
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    # ---- Summary table (closing stock by location x month) ----
+    # ---- Summary tables (segregated: New & Unopened vs Opened & Used vs Total) ----
     with st.container(border=True):
-        st.markdown(f'<div class="panel-title">{current} — closing stock by location</div>', unsafe_allow_html=True)
-        by_loc = {}
+        st.markdown(f'<div class="panel-title">{current} — closing stock by location</div>'
+                    f'<div class="panel-sub">Segregated breakdown of New &amp; Unopened stock vs. Opened &amp; Used stock across partner locations</div>', unsafe_allow_html=True)
+        
+        tab_new, tab_used, tab_tot = st.tabs(["📦 New & Unopened Stock", "📂 Opened & Used Stock", "📊 Total Combined Stock"])
+        
+        # Build matrices
+        by_loc_new = {}
+        by_loc_used = {}
+        by_loc_tot = {}
+        
         for r in data["items"][current]:
             k = (r.get("location_name") or "", r.get("address") or "")
-            by_loc.setdefault(k, {"Location": r.get("location_name") or r.get("address"),
-                                   "POC": r.get("poc_name", "")})
-            by_loc[k][r["month"][:3]] = r.get("closing_total", 0)
-        table_rows = list(by_loc.values())
-        if table_rows:
-            cols = ["Location", "POC"] + [m[:3] for m in months]
-            df = pd.DataFrame(table_rows)
-            for c in cols:
-                if c not in df.columns:
-                    df[c] = "—"
-            st.dataframe(df[cols], hide_index=True, use_container_width=True)
-        else:
-            st.markdown('<div class="log-item" style="border-bottom:none;">No data yet for this category</div>', unsafe_allow_html=True)
+            loc_label = r.get("location_name") or r.get("address")
+            poc_label = r.get("poc_name", "")
+            
+            by_loc_new.setdefault(k, {"Location": loc_label, "POC": poc_label})
+            by_loc_used.setdefault(k, {"Location": loc_label, "POC": poc_label})
+            by_loc_tot.setdefault(k, {"Location": loc_label, "POC": poc_label})
+            
+            by_loc_new[k][r["month"][:3]] = int(r.get("closing_new", 0) or 0)
+            by_loc_used[k][r["month"][:3]] = int(r.get("closing_used", 0) or 0)
+            by_loc_tot[k][r["month"][:3]] = int(r.get("closing_total", 0) or 0)
+        
+        cols = ["Location", "POC"] + [m[:3] for m in months]
+        
+        with tab_new:
+            rows_new = list(by_loc_new.values())
+            if rows_new:
+                df_new = pd.DataFrame(rows_new)
+                for c in cols:
+                    if c not in df_new.columns: df_new[c] = 0
+                st.dataframe(df_new[cols], hide_index=True, use_container_width=True)
+            else:
+                st.info("No data available.")
+
+        with tab_used:
+            rows_used = list(by_loc_used.values())
+            if rows_used:
+                df_used = pd.DataFrame(rows_used)
+                for c in cols:
+                    if c not in df_used.columns: df_used[c] = 0
+                st.dataframe(df_used[cols], hide_index=True, use_container_width=True)
+            else:
+                st.info("No data available.")
+
+        with tab_tot:
+            rows_tot = list(by_loc_tot.values())
+            if rows_tot:
+                df_tot = pd.DataFrame(rows_tot)
+                for c in cols:
+                    if c not in df_tot.columns: df_tot[c] = 0
+                st.dataframe(df_tot[cols], hide_index=True, use_container_width=True)
+            else:
+                st.info("No data available.")
 
     # ---- Monthly data entry (editable) ----
     with st.container(border=True):
@@ -673,6 +770,98 @@ def render_log():
 
 
 # ----------------------------------------------------------------------
+# GOOGLE SHEET SYNC HELPER
+# ----------------------------------------------------------------------
+
+def sync_data_from_google_sheet():
+    import urllib.request, urllib.parse, csv
+    doc_id = '1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0'
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    tab_names = ['Bedsheets (Double)', 'Dohars', 'Mattresses', 'Blankets', 'Pillows', 'Pillow Cover', 'Beds']
+    month_order = ["January", "February", "March", "April", "May", "June", "July", "August"]
+
+    def parse_num(v):
+        if not v: return 0
+        v = str(v).strip().replace(',', '')
+        if v in ('—', '-', '', 'None'): return 0
+        try:
+            val = float(v)
+            return int(val) if val.is_integer() else val
+        except:
+            return 0
+
+    locations_map = {}
+    new_items_data = {}
+
+    for item_name in tab_names:
+        encoded_name = urllib.parse.quote(item_name)
+        gviz_url = f'https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq?tqx=out:csv&sheet={encoded_name}'
+        req = urllib.request.Request(gviz_url, headers=headers)
+        with urllib.request.urlopen(req) as resp:
+            csv_text = resp.read().decode('utf-8', errors='ignore')
+            rows = list(csv.reader(csv_text.splitlines()))
+
+        item_recs = []
+        for r_idx in range(1, len(rows)):
+            row = rows[r_idx]
+            if not row or not any(row): continue
+            loc_name = row[0].strip() if len(row) > 0 else ""
+            address = row[1].strip() if len(row) > 1 else ""
+            poc_name = row[2].strip() if len(row) > 2 else ""
+            poc_contact = row[3].strip() if len(row) > 3 else ""
+            if loc_name.lower() == 'total' or (not loc_name and not address): continue
+
+            loc_key = (loc_name, address)
+            if loc_key not in locations_map:
+                locations_map[loc_key] = {
+                    "location_name": loc_name, "address": address,
+                    "poc_name": poc_name, "poc_contact": poc_contact
+                }
+            else:
+                if poc_name and not locations_map[loc_key]["poc_name"]:
+                    locations_map[loc_key]["poc_name"] = poc_name
+                if poc_contact and not locations_map[loc_key]["poc_contact"]:
+                    locations_map[loc_key]["poc_contact"] = poc_contact
+
+            for m in range(len(month_order)):
+                month_name = month_order[m]
+                year = "2026"
+                base_col = 4 + m * 11
+                if base_col + 10 >= len(row): continue
+
+                op_new = parse_num(row[base_col])
+                op_used = parse_num(row[base_col+1])
+                add_new = parse_num(row[base_col+3])
+                del_new = parse_num(row[base_col+4])
+                add_used = parse_num(row[base_col+5])
+                del_used = parse_num(row[base_col+6])
+                cl_new = parse_num(row[base_col+7])
+                cl_used = parse_num(row[base_col+8])
+                cl_tot = parse_num(row[base_col+9])
+                notes = row[base_col+10].strip() if len(row) > base_col+10 else ""
+
+                item_recs.append({
+                    "item": item_name, "location_name": loc_name, "address": address,
+                    "poc_name": poc_name, "month": month_name, "year": year,
+                    "opening_new": op_new, "opening_used": op_used, "opening_total": op_new + op_used,
+                    "add_new": add_new, "del_new": del_new, "add_used": add_used, "del_used": del_used,
+                    "closing_new": cl_new, "closing_used": cl_used,
+                    "closing_total": cl_tot if cl_tot > 0 else (cl_new + cl_used),
+                    "notes": notes
+                })
+
+        new_items_data[item_name] = item_recs
+
+    synced_data = {
+        "items": new_items_data,
+        "locations": list(locations_map.values())
+    }
+    save_data(synced_data)
+    st.session_state.data = synced_data
+    return True
+
+
+# ----------------------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------------------
 
@@ -690,7 +879,20 @@ def main():
     left, right = st.columns([3, 1])
     with left:
         st.markdown('<div class="eyebrow">● Sunbird Trust · Locations Stock Details</div>', unsafe_allow_html=True)
-        st.markdown('<div class="masthead-title">Inventory Management</div>', unsafe_allow_html=True)
+        
+        t_col1, t_col2 = st.columns([0.65, 0.35], vertical_alignment="center")
+        with t_col1:
+            st.markdown('<div class="masthead-title">Inventory Management</div>', unsafe_allow_html=True)
+        with t_col2:
+            if st.button("🔄 Sync Google Sheet", key="sync_gsheet_masthead", help="Sync latest inventory data directly from Google Sheets"):
+                with st.spinner("Syncing latest data from Google Sheets..."):
+                    try:
+                        sync_data_from_google_sheet()
+                        st.toast("Successfully synced from Google Sheets!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Sync error: {e}")
+
         st.markdown('<div class="masthead-sub">Stock &amp; contact register across partner locations — FY 2026-27</div>', unsafe_allow_html=True)
     with right:
         st.markdown(f'<div style="text-align:right;font-family:\'JetBrains Mono\',monospace;font-size:11.5px;color:{COLORS["ink_soft"]};padding-top:10px;">{span_label}<br>{len(items)} CATEGORIES</div>', unsafe_allow_html=True)
