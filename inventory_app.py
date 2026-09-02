@@ -30,6 +30,7 @@ DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inventory_
 GOOGLE_SHEET_ID = "1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0"
 GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/edit?usp=sharing"
 GOOGLE_SHEET_EXPORT_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
+HEADER_SCAN_ROWS = 100
 
 MONTH_ORDER = ["January", "February", "March", "April", "May", "June", "July",
                "August", "September", "October", "November", "December"]
@@ -80,11 +81,13 @@ def _normalise_column_name(value):
 
 COLUMN_ALIASES = {
     "item": {"item", "itemname", "category", "itemcategory", "inventoryitem"},
-    "location_name": {"location", "locationname", "name", "partnerlocation"},
-    "address": {"address", "locationaddress", "place", "village", "area"},
+    "location_name": {"location", "locationname", "name", "partnerlocation",
+                      "nameoflocation", "institution", "institutionname", "organization"},
+    "address": {"address", "locationaddress", "place", "village", "area",
+                "locationoraddress", "locationandaddress", "addresslocation"},
     "poc_name": {"poc", "pocname", "pointofcontact", "contactperson"},
     "poc_contact": {"poccontact", "contact", "contactnumber", "phone", "phone number"},
-    "month": {"month", "months"},
+    "month": {"month", "months", "monthyear", "monthandyear", "reportingmonth"},
     "year": {"year", "years"},
     "opening_new": {"openingnew", "opennew", "newopening"},
     "opening_used": {"openingused", "openused", "usedopening"},
@@ -109,6 +112,26 @@ def _canonical_columns(headers):
         if field and field not in canonical:
             canonical[field] = index
     return canonical
+
+
+def _find_inventory_header(raw_sheet):
+    """Return the best supported header row and its columns, if present.
+
+    Google Sheets exports include any title and instruction rows above the
+    table.  Those rows can grow as a register is maintained, so do not assume
+    that the column headings are near the top of the tab.
+    """
+    candidates = []
+    for row_index in range(min(HEADER_SCAN_ROWS, len(raw_sheet))):
+        columns = _canonical_columns(raw_sheet.iloc[row_index].tolist())
+        if "month" in columns and ({"address", "location_name"} & set(columns)):
+            # Prefer the most complete candidate if a sheet contains a sample
+            # table or repeated heading later in the tab.
+            candidates.append((len(columns), row_index, columns))
+    if not candidates:
+        return None
+    _, row_index, columns = max(candidates, key=lambda candidate: candidate[0])
+    return row_index, columns
 
 
 def _cell_text(value):
@@ -142,20 +165,19 @@ def _month_name(value):
 def spreadsheet_to_data(workbook):
     """Convert a normalized inventory workbook into the app's JSON structure.
 
-    Each data tab must have a header row within its first 20 rows and include
+    Each data tab must have a header row within its first 100 rows and include
     at least Month plus either Item (or an item-named tab) and Address/Location.
     Column names are matched case-insensitively and accept common variations.
     """
     items, locations, seen_locations = {}, [], set()
     sheets = pd.read_excel(BytesIO(workbook), sheet_name=None, header=None)
+    skipped_sheets = []
     for sheet_name, raw_sheet in sheets.items():
-        header_index = next((row_index for row_index in range(min(20, len(raw_sheet)))
-                             if "month" in _canonical_columns(raw_sheet.iloc[row_index].tolist())), None)
-        if header_index is None:
+        header = _find_inventory_header(raw_sheet)
+        if header is None:
+            skipped_sheets.append(str(sheet_name))
             continue
-        columns = _canonical_columns(raw_sheet.iloc[header_index].tolist())
-        if not ({"address", "location_name"} & set(columns)):
-            continue
+        header_index, columns = header
         for _, row in raw_sheet.iloc[header_index + 1:].iterrows():
             def value(field, default=""):
                 return _cell_text(row.iloc[columns[field]]) if field in columns else default
@@ -186,7 +208,12 @@ def spreadsheet_to_data(workbook):
                                   "poc_name": record["poc_name"], "poc_contact": value("poc_contact")})
                 seen_locations.add(location_key)
     if not items:
-        raise ValueError("No inventory rows were found. Check that the sheet is shared and has Month and Address/Location columns.")
+        skipped = ", ".join(skipped_sheets) or "none"
+        raise ValueError(
+            "No inventory rows were found. The downloaded workbook does not contain "
+            f"a supported table in its first {HEADER_SCAN_ROWS} rows (skipped tabs: {skipped}). "
+            "Each inventory tab needs Month (or Month & Year) and Address or Location columns."
+        )
     return {"items": items, "locations": locations}
 
 
