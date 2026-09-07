@@ -224,8 +224,69 @@ def kpi_card(label, value, foot, kind=""):
     """, unsafe_allow_html=True)
 
 
-def tag_html(note_type):
-    return f'<span class="tag" style="background:{NOTE_COLOR[note_type]}">{NOTE_LABEL[note_type]}</span>'
+def verify_inventory_data_integrity(data):
+    items = item_order()
+    month_order = MONTH_ORDER
+    mismatches = []
+    total_checks = 0
+
+    for item in items:
+        recs = data["items"].get(item, [])
+        by_loc = {}
+        for r in recs:
+            k = (r.get("location_name") or "", r.get("address") or "")
+            by_loc.setdefault(k, []).append(r)
+
+        for k, loc_recs in by_loc.items():
+            loc_label = k[0] or k[1]
+            sorted_recs = sorted(
+                [r for r in loc_recs if r["month"] in month_order],
+                key=lambda x: month_order.index(x["month"])
+            )
+
+            for i in range(len(sorted_recs)):
+                r = sorted_recs[i]
+                m = r["month"]
+                total_checks += 1
+
+                exp_cl_new = (r.get("opening_new", 0) or 0) + (r.get("add_new", 0) or 0) - (r.get("del_new", 0) or 0)
+                exp_cl_used = (r.get("opening_used", 0) or 0) + (r.get("add_used", 0) or 0) - (r.get("del_used", 0) or 0)
+
+                if (r.get("closing_new", 0) or 0) != exp_cl_new:
+                    mismatches.append({
+                        "type": "Math Discrepancy (New)",
+                        "item": item, "location": loc_label, "month": m,
+                        "expected": exp_cl_new, "found": r.get("closing_new", 0)
+                    })
+                if (r.get("closing_used", 0) or 0) != exp_cl_used:
+                    mismatches.append({
+                        "type": "Math Discrepancy (Used)",
+                        "item": item, "location": loc_label, "month": m,
+                        "expected": exp_cl_used, "found": r.get("closing_used", 0)
+                    })
+
+                if i > 0:
+                    prev_r = sorted_recs[i - 1]
+                    prev_m = prev_r["month"]
+                    if (r.get("opening_new", 0) or 0) != (prev_r.get("closing_new", 0) or 0):
+                        mismatches.append({
+                            "type": "Carryover Mismatch (New)",
+                            "item": item, "location": loc_label, "month": f"{prev_m} -> {m}",
+                            "expected": prev_r.get("closing_new", 0), "found": r.get("opening_new", 0)
+                        })
+                    if (r.get("opening_used", 0) or 0) != (prev_r.get("closing_used", 0) or 0):
+                        mismatches.append({
+                            "type": "Carryover Mismatch (Used)",
+                            "item": item, "location": loc_label, "month": f"{prev_m} -> {m}",
+                            "expected": prev_r.get("closing_used", 0), "found": r.get("opening_used", 0)
+                        })
+
+    return {
+        "status": "PASS" if not mismatches else "WARNING",
+        "total_checks": total_checks,
+        "mismatches": mismatches
+    }
+
 
 # ----------------------------------------------------------------------
 # OVERVIEW TAB
@@ -235,6 +296,21 @@ def render_overview():
     data = st.session_state.data
     items = item_order()
     locations = data["locations"]
+
+    # Automated Integrity & Carryover Audit
+    audit_res = verify_inventory_data_integrity(data)
+    if audit_res["status"] == "PASS":
+        st.markdown(
+            f'<div style="background:{COLORS["card"]}; border:1px solid {COLORS["sage"]}; border-radius:10px; padding:10px 16px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; font-size:12.5px;">'
+            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records (14 locations, Jan–Aug 2026).</span>'
+            f'<span style="font-family:\'JetBrains Mono\',monospace; font-size:11px; color:{COLORS["ink_soft"]}; font-weight:600;">0 ERRORS</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.error(f"⚠️ Audit Warning: Detected {len(audit_res['mismatches'])} data discrepancies.")
+        with st.expander("View Audit Discrepancies"):
+            st.write(pd.DataFrame(audit_res['mismatches']))
 
     total_stock = 0
     by_item = {}
@@ -892,6 +968,14 @@ def main():
                         st.rerun()
                     except Exception as e:
                         st.error(f"Sync error: {e}")
+            
+            gsheet_url = "https://docs.google.com/spreadsheets/d/1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0/edit"
+            st.markdown(
+                f'<div style="margin-top:2px;">'
+                f'<a href="{gsheet_url}" target="_blank" style="font-family:\'JetBrains Mono\',monospace; font-size:11px; color:{COLORS["indigo"]}; text-decoration:none; display:inline-block;">'
+                f'🔗 Open Google Sheet ↗</a></div>',
+                unsafe_allow_html=True
+            )
 
         st.markdown('<div class="masthead-sub">Stock &amp; contact register across partner locations — FY 2026-27</div>', unsafe_allow_html=True)
     with right:
