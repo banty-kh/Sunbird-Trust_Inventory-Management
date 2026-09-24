@@ -302,7 +302,7 @@ def render_overview():
     if audit_res["status"] == "PASS":
         st.markdown(
             f'<div style="background:{COLORS["card"]}; border:1px solid {COLORS["sage"]}; border-radius:10px; padding:10px 16px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; font-size:12.5px;">'
-            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records (14 locations, Jan–Aug 2026).</span>'
+            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records (11 locations, Jan–Aug 2026).</span>'
             f'<span style="font-family:\'JetBrains Mono\',monospace; font-size:11px; color:{COLORS["ink_soft"]}; font-weight:600;">0 ERRORS</span>'
             f'</div>',
             unsafe_allow_html=True
