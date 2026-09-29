@@ -12,6 +12,7 @@
 import json
 import os
 import copy
+from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
@@ -225,7 +226,7 @@ def kpi_card(label, value, foot, kind=""):
 
 
 def verify_inventory_data_integrity(data):
-    items = item_order()
+    items = list(data["items"].keys())
     month_order = MONTH_ORDER
     mismatches = []
     total_checks = 0
@@ -248,6 +249,14 @@ def verify_inventory_data_integrity(data):
                 r = sorted_recs[i]
                 m = r["month"]
                 total_checks += 1
+
+                # Some versions of the shared workbook contain only a closing
+                # stock column.  Those rows are valid inventory snapshots, but
+                # do not have enough information to verify the balance
+                # equation or a new/used carryover.  Do not turn missing source
+                # columns into misleading audit warnings.
+                if not r.get("_audit_math_available", True):
+                    continue
 
                 exp_cl_new = (r.get("opening_new", 0) or 0) + (r.get("add_new", 0) or 0) - (r.get("del_new", 0) or 0)
                 exp_cl_used = (r.get("opening_used", 0) or 0) + (r.get("add_used", 0) or 0) - (r.get("del_used", 0) or 0)
@@ -849,89 +858,139 @@ def render_log():
 # GOOGLE SHEET SYNC HELPER
 # ----------------------------------------------------------------------
 
+def _normalise_column_name(value):
+    """Return a comparison-friendly representation of a spreadsheet header."""
+    return " ".join("".join(ch if ch.isalnum() else " " for ch in str(value)).lower().split())
+
+
+def _number_from_sheet(value):
+    if pd.isna(value):
+        return 0
+    value = str(value).strip().replace(",", "")
+    if value.lower() in {"", "-", "—", "none", "n a"}:
+        return 0
+    try:
+        number = float(value)
+        return int(number) if number.is_integer() else number
+    except (TypeError, ValueError):
+        return 0
+
+
+def _month_and_year(value, year_value=""):
+    """Read dates such as ``August 2026`` without relying on one cell format."""
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.strftime("%B"), str(value.year)
+    text = "" if pd.isna(value) else str(value).strip()
+    parsed = pd.to_datetime(text, errors="coerce")
+    if not pd.isna(parsed):
+        return parsed.strftime("%B"), str(parsed.year)
+    parts = text.replace(",", " ").split()
+    month = next((m for m in MONTH_ORDER if m.lower() == (parts[0].lower() if parts else "")), "")
+    year = next((part for part in parts if part.isdigit() and len(part) == 4), "")
+    return month, year or ("" if pd.isna(year_value) else str(year_value).strip())
+
+
+def spreadsheet_to_data(workbook_bytes):
+    """Convert the current, row-based inventory workbook into app data.
+
+    The shared workbook can contain title/instruction rows before its table and
+    its tabs need not use exactly the same spelling for common headers.  This
+    importer finds the real header row rather than relying on fixed column
+    offsets from the retired monthly-block layout.
+    """
+    sheets = pd.read_excel(BytesIO(workbook_bytes), sheet_name=None, header=None)
+    items, locations = {}, {}
+
+    def column_for(headers, *aliases):
+        aliases = {_normalise_column_name(alias) for alias in aliases}
+        for index, header in enumerate(headers):
+            if header in aliases:
+                return index
+        return None
+
+    for sheet_name, raw in sheets.items():
+        header_row = None
+        headers = []
+        for row_index in range(min(len(raw), 100)):
+            candidate = [_normalise_column_name(v) for v in raw.iloc[row_index].tolist()]
+            has_month = column_for(candidate, "month", "month & year", "month year") is not None
+            has_location = column_for(candidate, "location", "location name", "location & address", "address") is not None
+            if has_month and has_location:
+                header_row, headers = row_index, candidate
+                break
+        if header_row is None:
+            continue
+
+        columns = {
+            "item": column_for(headers, "item", "item name", "category", "inventory item"),
+            "location_name": column_for(headers, "location name", "location"),
+            "address": column_for(headers, "address", "location & address"),
+            "poc_name": column_for(headers, "poc", "poc name", "point of contact"),
+            "poc_contact": column_for(headers, "poc contact", "contact", "contact number", "phone"),
+            "month": column_for(headers, "month", "month & year", "month year"),
+            "year": column_for(headers, "year"),
+            "opening_new": column_for(headers, "opening new", "opening stock new"),
+            "opening_used": column_for(headers, "opening used", "opening opened", "opening stock used"),
+            "add_new": column_for(headers, "add new", "added new", "addition new"),
+            "del_new": column_for(headers, "del new", "deleted new", "issued new"),
+            "add_used": column_for(headers, "add used", "added used", "addition used"),
+            "del_used": column_for(headers, "del used", "deleted used", "issued used"),
+            "closing_new": column_for(headers, "closing new", "closing stock new"),
+            "closing_used": column_for(headers, "closing used", "closing opened", "closing stock used"),
+            "closing_total": column_for(headers, "closing stock", "closing total", "closing stock total"),
+            "notes": column_for(headers, "notes", "note", "remarks", "comments"),
+        }
+        if columns["closing_total"] is None and columns["closing_new"] is None and columns["closing_used"] is None:
+            continue
+
+        for _, row in raw.iloc[header_row + 1:].iterrows():
+            def value(key, default=""):
+                index = columns[key]
+                return default if index is None or pd.isna(row.iloc[index]) else row.iloc[index]
+
+            month, year = _month_and_year(value("month"), value("year"))
+            location_name, address = str(value("location_name")).strip(), str(value("address")).strip()
+            item = str(value("item") or sheet_name).strip()
+            if not month or (not location_name and not address) or item.lower() == "total":
+                continue
+            numeric = {key: _number_from_sheet(value(key, 0)) for key in (
+                "opening_new", "opening_used", "add_new", "del_new", "add_used", "del_used", "closing_new", "closing_used", "closing_total"
+            )}
+            detailed = all(columns[key] is not None for key in ("opening_new", "opening_used", "add_new", "del_new", "add_used", "del_used", "closing_new", "closing_used"))
+            if columns["closing_total"] is None:
+                numeric["closing_total"] = numeric["closing_new"] + numeric["closing_used"]
+            elif not detailed:
+                # A simple closing-stock sheet has no new/used split.  Keeping
+                # it in the new bucket preserves every reported unit in charts.
+                numeric["closing_new"], numeric["closing_used"] = numeric["closing_total"], 0
+
+            record = {
+                "item": item, "location_name": location_name, "address": address,
+                "poc_name": str(value("poc_name")).strip(), "month": month, "year": year,
+                **numeric, "opening_total": numeric["opening_new"] + numeric["opening_used"],
+                "notes": str(value("notes")).strip(), "_audit_math_available": detailed,
+            }
+            items.setdefault(item, []).append(record)
+            key = (location_name, address)
+            location = locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
+            if record["poc_name"]:
+                location["poc_name"] = record["poc_name"]
+            contact = str(value("poc_contact")).strip()
+            if contact:
+                location["poc_contact"] = contact
+
+    if not items:
+        raise ValueError("No inventory rows found. Each tab needs Month and Location/Address headers.")
+    return {"items": items, "locations": list(locations.values())}
+
 def sync_data_from_google_sheet():
-    import urllib.request, urllib.parse, csv
+    import urllib.request
     doc_id = '1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0'
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    tab_names = ['Bedsheets (Double)', 'Dohars', 'Mattresses', 'Blankets', 'Pillows', 'Pillow Cover', 'Beds']
-    month_order = ["January", "February", "March", "April", "May", "June", "July", "August"]
-
-    def parse_num(v):
-        if not v: return 0
-        v = str(v).strip().replace(',', '')
-        if v in ('—', '-', '', 'None'): return 0
-        try:
-            val = float(v)
-            return int(val) if val.is_integer() else val
-        except:
-            return 0
-
-    locations_map = {}
-    new_items_data = {}
-
-    for item_name in tab_names:
-        encoded_name = urllib.parse.quote(item_name)
-        gviz_url = f'https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq?tqx=out:csv&sheet={encoded_name}'
-        req = urllib.request.Request(gviz_url, headers=headers)
-        with urllib.request.urlopen(req) as resp:
-            csv_text = resp.read().decode('utf-8', errors='ignore')
-            rows = list(csv.reader(csv_text.splitlines()))
-
-        item_recs = []
-        for r_idx in range(1, len(rows)):
-            row = rows[r_idx]
-            if not row or not any(row): continue
-            loc_name = row[0].strip() if len(row) > 0 else ""
-            address = row[1].strip() if len(row) > 1 else ""
-            poc_name = row[2].strip() if len(row) > 2 else ""
-            poc_contact = row[3].strip() if len(row) > 3 else ""
-            if loc_name.lower() == 'total' or (not loc_name and not address): continue
-
-            loc_key = (loc_name, address)
-            if loc_key not in locations_map:
-                locations_map[loc_key] = {
-                    "location_name": loc_name, "address": address,
-                    "poc_name": poc_name, "poc_contact": poc_contact
-                }
-            else:
-                if poc_name and not locations_map[loc_key]["poc_name"]:
-                    locations_map[loc_key]["poc_name"] = poc_name
-                if poc_contact and not locations_map[loc_key]["poc_contact"]:
-                    locations_map[loc_key]["poc_contact"] = poc_contact
-
-            for m in range(len(month_order)):
-                month_name = month_order[m]
-                year = "2026"
-                base_col = 4 + m * 11
-                if base_col + 10 >= len(row): continue
-
-                op_new = parse_num(row[base_col])
-                op_used = parse_num(row[base_col+1])
-                add_new = parse_num(row[base_col+3])
-                del_new = parse_num(row[base_col+4])
-                add_used = parse_num(row[base_col+5])
-                del_used = parse_num(row[base_col+6])
-                cl_new = parse_num(row[base_col+7])
-                cl_used = parse_num(row[base_col+8])
-                cl_tot = parse_num(row[base_col+9])
-                notes = row[base_col+10].strip() if len(row) > base_col+10 else ""
-
-                item_recs.append({
-                    "item": item_name, "location_name": loc_name, "address": address,
-                    "poc_name": poc_name, "month": month_name, "year": year,
-                    "opening_new": op_new, "opening_used": op_used, "opening_total": op_new + op_used,
-                    "add_new": add_new, "del_new": del_new, "add_used": add_used, "del_used": del_used,
-                    "closing_new": cl_new, "closing_used": cl_used,
-                    "closing_total": cl_tot if cl_tot > 0 else (cl_new + cl_used),
-                    "notes": notes
-                })
-
-        new_items_data[item_name] = item_recs
-
-    synced_data = {
-        "items": new_items_data,
-        "locations": list(locations_map.values())
-    }
+    export_url = f'https://docs.google.com/spreadsheets/d/{doc_id}/export?format=xlsx'
+    req = urllib.request.Request(export_url, headers=headers)
+    with urllib.request.urlopen(req) as response:
+        synced_data = spreadsheet_to_data(response.read())
     save_data(synced_data)
     st.session_state.data = synced_data
     return True
