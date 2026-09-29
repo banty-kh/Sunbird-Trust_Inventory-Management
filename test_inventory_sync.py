@@ -39,6 +39,25 @@ class SpreadsheetToDataTests(unittest.TestCase):
         self.assertEqual(record["closing_used"], 0)
         self.assertEqual(verify_inventory_data_integrity(data)["status"], "PASS")
 
+    def test_imports_directory_locations_that_have_no_item_rows(self):
+        workbook = BytesIO()
+        with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+            pd.DataFrame([
+                ["Item", "Location", "Month & Year", "Closing Stock"],
+                ["Blankets", "Aben", "August 2026", 12],
+            ]).to_excel(writer, sheet_name="Items", header=False, index=False)
+            pd.DataFrame([
+                ["Name of Location", "Location Address", "Contact Person", "Phone Number"],
+                ["Aben", "Aben village", "Updated POC", "12345"],
+                ["New Hostel", "New Hostel village", "New POC", "67890"],
+            ]).to_excel(writer, sheet_name="Locations", header=False, index=False)
+
+        data = spreadsheet_to_data(workbook.getvalue())
+        locations = {(location["location_name"], location["address"]): location for location in data["locations"]}
+
+        self.assertEqual(locations[("New Hostel", "New Hostel village")]["poc_name"], "New POC")
+        self.assertEqual(locations[("Aben", "Aben village")]["poc_contact"], "12345")
+
 
 if __name__ == "__main__":
     unittest.main()
