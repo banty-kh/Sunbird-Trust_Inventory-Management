@@ -928,6 +928,12 @@ def spreadsheet_to_data(workbook_bytes):
             "poc_name": column_for(headers, "poc", "poc name", "point of contact", "contact person", "contact person name"),
             "poc_contact": column_for(headers, "poc contact", "contact", "contact number", "phone", "phone number", "mobile"),
             "month": column_for(headers, "month", "month & year", "month year", "date"),
+            "item": column_for(headers, "item", "item name", "category", "inventory item"),
+            "location_name": column_for(headers, "location name", "location"),
+            "address": column_for(headers, "address", "location & address"),
+            "poc_name": column_for(headers, "poc", "poc name", "point of contact"),
+            "poc_contact": column_for(headers, "poc contact", "contact", "contact number", "phone"),
+            "month": column_for(headers, "month", "month & year", "month year"),
             "year": column_for(headers, "year"),
             "opening_new": column_for(headers, "opening new", "opening stock new"),
             "opening_used": column_for(headers, "opening used", "opening opened", "opening stock used"),
@@ -990,6 +996,7 @@ def spreadsheet_to_data(workbook_bytes):
         # the current workbook), rather than a list inferred from stock rows.
         if _normalise_column_name(sheet_name) not in {"location", "locations", "location details"}:
             continue
+    for sheet_name, raw in sheets.items():
         header_row = None
         headers = []
         for row_index in range(min(len(raw), 100)):
@@ -1014,6 +1021,20 @@ def spreadsheet_to_data(workbook_bytes):
                 continue
             key = (location_name, address)
             location = directory_locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
+            same_name_keys = [existing_key for existing_key in locations if existing_key[0] == location_name]
+            if key not in locations and len(same_name_keys) == 1:
+                # Item rows sometimes contain only a location name while the
+                # directory provides its full address.  Canonicalise those
+                # rows to the directory key so stock and directory cards join.
+                old_key = same_name_keys[0]
+                old_location = locations.pop(old_key)
+                old_location["address"] = address or old_location["address"]
+                locations[key] = old_location
+                for item_records in items.values():
+                    for record in item_records:
+                        if (record["location_name"], record["address"]) == old_key:
+                            record["address"] = old_location["address"]
+            location = locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
             # This pass intentionally overwrites inferred values: the directory
             # is the source of truth for location contact details.
             location["poc_name"] = cell(poc_name_column) or location["poc_name"]

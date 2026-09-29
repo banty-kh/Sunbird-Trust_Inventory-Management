@@ -59,6 +59,8 @@ class SpreadsheetToDataTests(unittest.TestCase):
         self.assertEqual(locations[("New Hostel", "New Hostel village")]["poc_name"], "New POC")
         self.assertEqual(locations[("Aben", "Aben village")]["poc_contact"], "12345")
         self.assertEqual(data["items"]["Blankets"][0]["address"], "Aben village")
+        self.assertEqual(locations[("New Hostel", "New Hostel village")]["poc_name"], "New POC")
+        self.assertEqual(locations[("Aben", "Aben village")]["poc_contact"], "12345")
 
 
 if __name__ == "__main__":
