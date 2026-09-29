@@ -311,7 +311,7 @@ def render_overview():
     if audit_res["status"] == "PASS":
         st.markdown(
             f'<div style="background:{COLORS["card"]}; border:1px solid {COLORS["sage"]}; border-radius:10px; padding:10px 16px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; font-size:12.5px;">'
-            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records (11 locations, Jan–Aug 2026).</span>'
+            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records ({len(locations)} locations, Jan–Aug 2026).</span>'
             f'<span style="font-family:\'JetBrains Mono\',monospace; font-size:11px; color:{COLORS["ink_soft"]}; font-weight:600;">0 ERRORS</span>'
             f'</div>',
             unsafe_allow_html=True
@@ -989,6 +989,13 @@ def spreadsheet_to_data(workbook_bytes):
     # Import it independently so locations without stock rows still appear in
     # the directory, and so its contact details take precedence over any stale
     # contact data copied into the Items sheet.
+    directory_locations = {}
+    for sheet_name, raw in sheets.items():
+        # Do not treat the location column in Items as a directory.  When a
+        # Locations sheet is present, it is the authoritative list (11 rows in
+        # the current workbook), rather than a list inferred from stock rows.
+        if _normalise_column_name(sheet_name) not in {"location", "locations", "location details"}:
+            continue
     for sheet_name, raw in sheets.items():
         header_row = None
         headers = []
@@ -1013,6 +1020,7 @@ def spreadsheet_to_data(workbook_bytes):
             if (not location_name and not address) or location_name.lower() in {"total", "location"}:
                 continue
             key = (location_name, address)
+            location = directory_locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
             same_name_keys = [existing_key for existing_key in locations if existing_key[0] == location_name]
             if key not in locations and len(same_name_keys) == 1:
                 # Item rows sometimes contain only a location name while the
@@ -1031,6 +1039,23 @@ def spreadsheet_to_data(workbook_bytes):
             # is the source of truth for location contact details.
             location["poc_name"] = cell(poc_name_column) or location["poc_name"]
             location["poc_contact"] = cell(poc_contact_column) or location["poc_contact"]
+
+    if directory_locations:
+        # Item rows sometimes contain only a location name while the directory
+        # provides the full address. Canonicalise records to a unique directory
+        # match so stock and directory cards join, without adding phantom
+        # locations to the directory.
+        for item_records in items.values():
+            for record in item_records:
+                exact_key = (record["location_name"], record["address"])
+                matches = [key for key in directory_locations if key == exact_key]
+                if not matches:
+                    matches = [key for key in directory_locations if key[0] == record["location_name"]]
+                if not matches:
+                    matches = [key for key in directory_locations if key[1] == record["address"]]
+                if len(matches) == 1:
+                    record["location_name"], record["address"] = matches[0]
+        locations = directory_locations
 
     if not items:
         raise ValueError("No inventory rows found. Each tab needs Month and Location/Address headers.")

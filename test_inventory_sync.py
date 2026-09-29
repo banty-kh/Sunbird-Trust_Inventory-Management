@@ -55,6 +55,10 @@ class SpreadsheetToDataTests(unittest.TestCase):
         data = spreadsheet_to_data(workbook.getvalue())
         locations = {(location["location_name"], location["address"]): location for location in data["locations"]}
 
+        self.assertEqual(len(locations), 2)
+        self.assertEqual(locations[("New Hostel", "New Hostel village")]["poc_name"], "New POC")
+        self.assertEqual(locations[("Aben", "Aben village")]["poc_contact"], "12345")
+        self.assertEqual(data["items"]["Blankets"][0]["address"], "Aben village")
         self.assertEqual(locations[("New Hostel", "New Hostel village")]["poc_name"], "New POC")
         self.assertEqual(locations[("Aben", "Aben village")]["poc_contact"], "12345")
 
