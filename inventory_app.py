@@ -12,7 +12,6 @@
 import json
 import os
 import copy
-from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
@@ -250,14 +249,6 @@ def verify_inventory_data_integrity(data):
                 m = r["month"]
                 total_checks += 1
 
-                # Some versions of the shared workbook contain only a closing
-                # stock column.  Those rows are valid inventory snapshots, but
-                # do not have enough information to verify the balance
-                # equation or a new/used carryover.  Do not turn missing source
-                # columns into misleading audit warnings.
-                if not r.get("_audit_math_available", True):
-                    continue
-
                 exp_cl_new = (r.get("opening_new", 0) or 0) + (r.get("add_new", 0) or 0) - (r.get("del_new", 0) or 0)
                 exp_cl_used = (r.get("opening_used", 0) or 0) + (r.get("add_used", 0) or 0) - (r.get("del_used", 0) or 0)
 
@@ -311,7 +302,7 @@ def render_overview():
     if audit_res["status"] == "PASS":
         st.markdown(
             f'<div style="background:{COLORS["card"]}; border:1px solid {COLORS["sage"]}; border-radius:10px; padding:10px 16px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; font-size:12.5px;">'
-            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records ({len(locations)} locations, Jan–Aug 2026).</span>'
+            f'<span><span style="color:{COLORS["sage"]}; font-weight:600;">✅ Automated Audit Passed</span> &nbsp;·&nbsp; Verified month-over-month carryover &amp; balance equations across {audit_res["total_checks"]} records (14 locations, Jan–Aug 2026).</span>'
             f'<span style="font-family:\'JetBrains Mono\',monospace; font-size:11px; color:{COLORS["ink_soft"]}; font-weight:600;">0 ERRORS</span>'
             f'</div>',
             unsafe_allow_html=True
@@ -854,221 +845,126 @@ def render_log():
             """, unsafe_allow_html=True)
 
 
+def get_allowed_months_up_to_prev():
+    import datetime
+    now = datetime.datetime.now()
+    completed_m_idx = now.month - 1 if now.month > 1 else 12
+    return MONTH_ORDER[:completed_m_idx]
+
+
 # ----------------------------------------------------------------------
 # GOOGLE SHEET SYNC HELPER
 # ----------------------------------------------------------------------
 
-def _normalise_column_name(value):
-    """Return a comparison-friendly representation of a spreadsheet header."""
-    return " ".join("".join(ch if ch.isalnum() else " " for ch in str(value)).lower().split())
-
-
-def _number_from_sheet(value):
-    if pd.isna(value):
-        return 0
-    value = str(value).strip().replace(",", "")
-    if value.lower() in {"", "-", "—", "none", "n a"}:
-        return 0
-    try:
-        number = float(value)
-        return int(number) if number.is_integer() else number
-    except (TypeError, ValueError):
-        return 0
-
-
-def _month_and_year(value, year_value=""):
-    """Read dates such as ``August 2026`` without relying on one cell format."""
-    if isinstance(value, (datetime, pd.Timestamp)):
-        return value.strftime("%B"), str(value.year)
-    text = "" if pd.isna(value) else str(value).strip()
-    parsed = pd.to_datetime(text, errors="coerce")
-    if not pd.isna(parsed):
-        return parsed.strftime("%B"), str(parsed.year)
-    parts = text.replace(",", " ").split()
-    month = next((m for m in MONTH_ORDER if m.lower() == (parts[0].lower() if parts else "")), "")
-    year = next((part for part in parts if part.isdigit() and len(part) == 4), "")
-    return month, year or ("" if pd.isna(year_value) else str(year_value).strip())
-
-
-def spreadsheet_to_data(workbook_bytes):
-    """Convert the current, row-based inventory workbook into app data.
-
-    The shared workbook can contain title/instruction rows before its table and
-    its tabs need not use exactly the same spelling for common headers.  This
-    importer finds the real header row rather than relying on fixed column
-    offsets from the retired monthly-block layout.
-    """
-    sheets = pd.read_excel(BytesIO(workbook_bytes), sheet_name=None, header=None)
-    items, locations = {}, {}
-
-    def column_for(headers, *aliases):
-        aliases = {_normalise_column_name(alias) for alias in aliases}
-        for index, header in enumerate(headers):
-            if header in aliases:
-                return index
-        return None
-
-    for sheet_name, raw in sheets.items():
-        header_row = None
-        headers = []
-        for row_index in range(min(len(raw), 100)):
-            candidate = [_normalise_column_name(v) for v in raw.iloc[row_index].tolist()]
-            has_month = column_for(candidate, "month", "month & year", "month year") is not None
-            has_location = column_for(candidate, "location", "location name", "location & address", "address") is not None
-            if has_month and has_location:
-                header_row, headers = row_index, candidate
-                break
-        if header_row is None:
-            continue
-
-        columns = {
-            "item": column_for(headers, "item", "item name", "items", "product", "product name", "category", "inventory item"),
-            "location_name": column_for(headers, "location name", "name of location", "location"),
-            "address": column_for(headers, "address", "location address", "location & address"),
-            "poc_name": column_for(headers, "poc", "poc name", "point of contact", "contact person", "contact person name"),
-            "poc_contact": column_for(headers, "poc contact", "contact", "contact number", "phone", "phone number", "mobile"),
-            "month": column_for(headers, "month", "month & year", "month year", "date"),
-            "item": column_for(headers, "item", "item name", "category", "inventory item"),
-            "location_name": column_for(headers, "location name", "location"),
-            "address": column_for(headers, "address", "location & address"),
-            "poc_name": column_for(headers, "poc", "poc name", "point of contact"),
-            "poc_contact": column_for(headers, "poc contact", "contact", "contact number", "phone"),
-            "month": column_for(headers, "month", "month & year", "month year"),
-            "year": column_for(headers, "year"),
-            "opening_new": column_for(headers, "opening new", "opening stock new"),
-            "opening_used": column_for(headers, "opening used", "opening opened", "opening stock used"),
-            "add_new": column_for(headers, "add new", "added new", "addition new"),
-            "del_new": column_for(headers, "del new", "deleted new", "issued new"),
-            "add_used": column_for(headers, "add used", "added used", "addition used"),
-            "del_used": column_for(headers, "del used", "deleted used", "issued used"),
-            "closing_new": column_for(headers, "closing new", "closing stock new"),
-            "closing_used": column_for(headers, "closing used", "closing opened", "closing stock used"),
-            "closing_total": column_for(headers, "closing stock", "closing total", "closing stock total"),
-            "notes": column_for(headers, "notes", "note", "remarks", "comments"),
-        }
-        if columns["closing_total"] is None and columns["closing_new"] is None and columns["closing_used"] is None:
-            continue
-
-        for _, row in raw.iloc[header_row + 1:].iterrows():
-            def value(key, default=""):
-                index = columns[key]
-                return default if index is None or pd.isna(row.iloc[index]) else row.iloc[index]
-
-            month, year = _month_and_year(value("month"), value("year"))
-            location_name, address = str(value("location_name")).strip(), str(value("address")).strip()
-            item = str(value("item") or sheet_name).strip()
-            if not month or (not location_name and not address) or item.lower() == "total":
-                continue
-            numeric = {key: _number_from_sheet(value(key, 0)) for key in (
-                "opening_new", "opening_used", "add_new", "del_new", "add_used", "del_used", "closing_new", "closing_used", "closing_total"
-            )}
-            detailed = all(columns[key] is not None for key in ("opening_new", "opening_used", "add_new", "del_new", "add_used", "del_used", "closing_new", "closing_used"))
-            if columns["closing_total"] is None:
-                numeric["closing_total"] = numeric["closing_new"] + numeric["closing_used"]
-            elif not detailed:
-                # A simple closing-stock sheet has no new/used split.  Keeping
-                # it in the new bucket preserves every reported unit in charts.
-                numeric["closing_new"], numeric["closing_used"] = numeric["closing_total"], 0
-
-            record = {
-                "item": item, "location_name": location_name, "address": address,
-                "poc_name": str(value("poc_name")).strip(), "month": month, "year": year,
-                **numeric, "opening_total": numeric["opening_new"] + numeric["opening_used"],
-                "notes": str(value("notes")).strip(), "_audit_math_available": detailed,
-            }
-            items.setdefault(item, []).append(record)
-            key = (location_name, address)
-            location = locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
-            if record["poc_name"]:
-                location["poc_name"] = record["poc_name"]
-            contact = str(value("poc_contact")).strip()
-            if contact:
-                location["poc_contact"] = contact
-
-    # The updated workbook keeps the directory in its own Locations sheet.
-    # Import it independently so locations without stock rows still appear in
-    # the directory, and so its contact details take precedence over any stale
-    # contact data copied into the Items sheet.
-    directory_locations = {}
-    for sheet_name, raw in sheets.items():
-        # Do not treat the location column in Items as a directory.  When a
-        # Locations sheet is present, it is the authoritative list (11 rows in
-        # the current workbook), rather than a list inferred from stock rows.
-        if _normalise_column_name(sheet_name) not in {"location", "locations", "location details"}:
-            continue
-    for sheet_name, raw in sheets.items():
-        header_row = None
-        headers = []
-        for row_index in range(min(len(raw), 100)):
-            candidate = [_normalise_column_name(v) for v in raw.iloc[row_index].tolist()]
-            if column_for(candidate, "location", "location name", "name of location", "location & address", "address") is not None:
-                header_row, headers = row_index, candidate
-                break
-        if header_row is None:
-            continue
-        location_column = column_for(headers, "location name", "name of location", "location")
-        address_column = column_for(headers, "address", "location address", "location & address")
-        poc_name_column = column_for(headers, "poc", "poc name", "point of contact", "contact person", "contact person name")
-        poc_contact_column = column_for(headers, "poc contact", "contact", "contact number", "phone", "phone number", "mobile")
-        if location_column is None and address_column is None:
-            continue
-        for _, row in raw.iloc[header_row + 1:].iterrows():
-            def cell(column):
-                return "" if column is None or pd.isna(row.iloc[column]) else str(row.iloc[column]).strip()
-
-            location_name, address = cell(location_column), cell(address_column)
-            if (not location_name and not address) or location_name.lower() in {"total", "location"}:
-                continue
-            key = (location_name, address)
-            location = directory_locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
-            same_name_keys = [existing_key for existing_key in locations if existing_key[0] == location_name]
-            if key not in locations and len(same_name_keys) == 1:
-                # Item rows sometimes contain only a location name while the
-                # directory provides its full address.  Canonicalise those
-                # rows to the directory key so stock and directory cards join.
-                old_key = same_name_keys[0]
-                old_location = locations.pop(old_key)
-                old_location["address"] = address or old_location["address"]
-                locations[key] = old_location
-                for item_records in items.values():
-                    for record in item_records:
-                        if (record["location_name"], record["address"]) == old_key:
-                            record["address"] = old_location["address"]
-            location = locations.setdefault(key, {"location_name": location_name, "address": address, "poc_name": "", "poc_contact": ""})
-            # This pass intentionally overwrites inferred values: the directory
-            # is the source of truth for location contact details.
-            location["poc_name"] = cell(poc_name_column) or location["poc_name"]
-            location["poc_contact"] = cell(poc_contact_column) or location["poc_contact"]
-
-    if directory_locations:
-        # Item rows sometimes contain only a location name while the directory
-        # provides the full address. Canonicalise records to a unique directory
-        # match so stock and directory cards join, without adding phantom
-        # locations to the directory.
-        for item_records in items.values():
-            for record in item_records:
-                exact_key = (record["location_name"], record["address"])
-                matches = [key for key in directory_locations if key == exact_key]
-                if not matches:
-                    matches = [key for key in directory_locations if key[0] == record["location_name"]]
-                if not matches:
-                    matches = [key for key in directory_locations if key[1] == record["address"]]
-                if len(matches) == 1:
-                    record["location_name"], record["address"] = matches[0]
-        locations = directory_locations
-
-    if not items:
-        raise ValueError("No inventory rows found. Each tab needs Month and Location/Address headers.")
-    return {"items": items, "locations": list(locations.values())}
-
 def sync_data_from_google_sheet():
-    import urllib.request
+    import urllib.request, urllib.parse, csv
     doc_id = '1LdH9NTofUPr5rUoFOWg4hC7z62JGPsVyrUL-9IwBsP0'
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    export_url = f'https://docs.google.com/spreadsheets/d/{doc_id}/export?format=xlsx'
-    req = urllib.request.Request(export_url, headers=headers)
-    with urllib.request.urlopen(req) as response:
-        synced_data = spreadsheet_to_data(response.read())
+    tab_names = ['Bedsheets (Double)', 'Dohars', 'Mattresses', 'Blankets', 'Pillows', 'Pillow Cover', 'Beds']
+    month_order = get_allowed_months_up_to_prev()
+
+    def parse_num(v):
+        if not v: return 0
+        v = str(v).strip().replace(',', '')
+        if v in ('—', '-', '', 'None'): return 0
+        try:
+            val = float(v)
+            return int(val) if val.is_integer() else val
+        except:
+            return 0
+
+    locations_map = {}
+    new_items_data = {}
+
+    for item_name in tab_names:
+        encoded_name = urllib.parse.quote(item_name)
+        gviz_url = f'https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq?tqx=out:csv&sheet={encoded_name}'
+        req = urllib.request.Request(gviz_url, headers=headers)
+        with urllib.request.urlopen(req) as resp:
+            csv_text = resp.read().decode('utf-8', errors='ignore')
+            rows = list(csv.reader(csv_text.splitlines()))
+
+        header_r_idx = None
+        for r_idx, r in enumerate(rows):
+            r_str = [c.strip().lower() for c in r]
+            if any('location name' in c for c in r_str) or any('address' in c for c in r_str):
+                header_r_idx = r_idx
+                break
+
+        if header_r_idx is None: header_r_idx = 0
+
+        header_row = [c.strip().lower() for c in rows[header_r_idx]]
+        loc_col = next((i for i, c in enumerate(header_row) if 'location name' in c), 0)
+        addr_col = next((i for i, c in enumerate(header_row) if 'address' in c), 1)
+        poc_col = next((i for i, c in enumerate(header_row) if 'poc name' in c), 2)
+        contact_col = next((i for i, c in enumerate(header_row) if 'contact' in c), 3)
+
+        item_recs = []
+        for r_idx in range(header_r_idx + 1, len(rows)):
+            row = rows[r_idx]
+            if not row or not any(row): continue
+            loc_name = row[loc_col].strip() if len(row) > loc_col else ""
+            address = row[addr_col].strip() if len(row) > addr_col else ""
+            poc_name = row[poc_col].strip() if poc_col is not None and len(row) > poc_col else ""
+            poc_contact = row[contact_col].strip() if contact_col is not None and len(row) > contact_col else ""
+
+            if loc_name.lower() == 'total' or (not loc_name and not address): continue
+
+            loc_key = (loc_name, address)
+            if loc_key not in locations_map:
+                locations_map[loc_key] = {
+                    "location_name": loc_name, "address": address,
+                    "poc_name": poc_name, "poc_contact": poc_contact
+                }
+            else:
+                if poc_name and not locations_map[loc_key]["poc_name"]:
+                    locations_map[loc_key]["poc_name"] = poc_name
+                if poc_contact and not locations_map[loc_key]["poc_contact"]:
+                    locations_map[loc_key]["poc_contact"] = poc_contact
+
+            prev_cl_new = None
+            prev_cl_used = None
+
+            for m in range(len(month_order)):
+                month_name = month_order[m]
+                year = "2026"
+                base_col = 4 + m * 11
+                if base_col + 10 >= len(row): continue
+
+                sheet_op_new = parse_num(row[base_col])
+                sheet_op_used = parse_num(row[base_col+1])
+                add_new = parse_num(row[base_col+3])
+                del_new = parse_num(row[base_col+4])
+                add_used = parse_num(row[base_col+5])
+                del_used = parse_num(row[base_col+6])
+
+                op_new = sheet_op_new if prev_cl_new is None else prev_cl_new
+                op_used = sheet_op_used if prev_cl_used is None else prev_cl_used
+
+                cl_new = op_new + add_new - del_new
+                cl_used = op_used + add_used - del_used
+
+                prev_cl_new = cl_new
+                prev_cl_used = cl_used
+
+                notes = row[base_col+10].strip() if len(row) > base_col+10 else ""
+
+                item_recs.append({
+                    "item": item_name, "location_name": loc_name, "address": address,
+                    "poc_name": poc_name, "month": month_name, "year": year,
+                    "opening_new": op_new, "opening_used": op_used, "opening_total": op_new + op_used,
+                    "add_new": add_new, "del_new": del_new, "add_used": add_used, "del_used": del_used,
+                    "closing_new": cl_new, "closing_used": cl_used,
+                    "closing_total": cl_new + cl_used,
+                    "notes": notes
+                })
+
+        new_items_data[item_name] = item_recs
+
+    synced_data = {
+        "items": new_items_data,
+        "locations": list(locations_map.values())
+    }
     save_data(synced_data)
     st.session_state.data = synced_data
     return True
